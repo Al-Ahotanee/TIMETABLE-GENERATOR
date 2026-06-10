@@ -1,0 +1,9 @@
+SECRET_KEY=change-me-to-a-long-random-string
+JWT_SECRET_KEY=change-me-to-another-random-string
+DATABASE_URL=postgresql://user:password@host:5432/timetable_db
+MAIL_SERVER=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USE_TLS=true
+MAIL_USERNAME=your-email@gmail.com
+MAIL_PASSWORD=your-app-password
+MAIL_DEFAULT_SENDER=your-email@gmail.com
