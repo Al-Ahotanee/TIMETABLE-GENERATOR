@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Timetable Generator</title>
+  <title>Automated Timetable Generator</title>
   <!-- Tailwind CSS via CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -12,19 +12,25 @@
       theme: { extend: {} }
     }
   </script>
-  <!-- Font Awesome for icons (free) -->
+  <!-- Font Awesome -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
   <style>
-    /* Custom scrollbar and misc */
     .sidebar::-webkit-scrollbar { width: 6px; }
     .sidebar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
     .dark .sidebar::-webkit-scrollbar-thumb { background: #475569; }
+    /* Shadcn-like styles */
+    .btn { @apply inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50; }
+    .btn-primary { @apply bg-blue-600 text-white hover:bg-blue-700; }
+    .btn-secondary { @apply bg-gray-200 text-gray-900 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-100; }
+    .btn-danger { @apply bg-red-600 text-white hover:bg-red-700; }
+    .input { @apply flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100; }
+    .card { @apply rounded-lg border bg-white shadow dark:bg-gray-800 dark:border-gray-700; }
   </style>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen">
   <div id="root"></div>
 
-  <!-- ESM Imports -->
+  <!-- ESM Import Map -->
   <script type="importmap">
     {
       "imports": {
@@ -33,7 +39,9 @@
         "react-router-dom": "https://esm.sh/react-router-dom@6.20.0",
         "recharts": "https://esm.sh/recharts@2.10.3",
         "jspdf": "https://esm.sh/jspdf@2.5.1",
-        "html2canvas": "https://esm.sh/html2canvas@1.4.1"
+        "html2canvas": "https://esm.sh/html2canvas@1.4.1",
+        "@tanstack/react-query": "https://esm.sh/@tanstack/react-query@5.17.19",
+        "zustand": "https://esm.sh/zustand@4.4.7"
       }
     }
   </script>
@@ -41,71 +49,55 @@
   <script type="module">
     import React, { useState, useEffect, useContext, createContext, useRef, useCallback, useMemo } from 'react';
     import { createRoot } from 'react-dom/client';
-    import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation, Navigate, useParams } from 'react-router-dom';
+    import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation, Navigate, useParams, useSearchParams } from 'react-router-dom';
     import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
     import jsPDF from 'jspdf';
     import html2canvas from 'html2canvas';
+    import { QueryClient, QueryClientProvider, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+    import { create } from 'zustand';
 
     // ---------- Constants ----------
     const API_BASE = window.location.origin + '/api';
     const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
     const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'];
 
-    // ---------- Auth Context ----------
-    const AuthContext = createContext();
-
-    function AuthProvider({ children }) {
-      const [user, setUser] = useState(null);
-      const [token, setToken] = useState(localStorage.getItem('token') || null);
-      const [loading, setLoading] = useState(true);
-
-      useEffect(() => {
-        if (token) {
-          fetchUser();
-        } else {
-          setLoading(false);
-        }
-      }, [token]);
-
-      const fetchUser = async () => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            setUser(data.user);
-          } else {
-            logout();
-          }
-        } catch { logout(); }
-        setLoading(false);
-      };
-
-      const login = (newToken, userData) => {
-        localStorage.setItem('token', newToken);
-        setToken(newToken);
-        setUser(userData);
-      };
-
-      const logout = () => {
+    // ---------- Zustand Store (Auth + Theme) ----------
+    const useStore = create((set, get) => ({
+      user: null,
+      token: localStorage.getItem('token') || null,
+      theme: localStorage.getItem('theme') || 'light',
+      login: (token, userData) => {
+        localStorage.setItem('token', token);
+        set({ token, user: userData });
+      },
+      logout: () => {
         localStorage.removeItem('token');
-        setToken(null);
-        setUser(null);
-      };
+        set({ token: null, user: null });
+      },
+      setUser: (user) => set({ user }),
+      toggleTheme: () => {
+        const newTheme = get().theme === 'dark' ? 'light' : 'dark';
+        localStorage.setItem('theme', newTheme);
+        document.documentElement.classList.toggle('dark', newTheme === 'dark');
+        set({ theme: newTheme });
+      },
+      initTheme: () => {
+        const theme = get().theme;
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+      }
+    }));
 
-      return (
-        <AuthContext.Provider value={{ user, token, login, logout, loading }}>
-          {children}
-        </AuthContext.Provider>
-      );
-    }
+    // ---------- Query Client ----------
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { staleTime: 60000, retry: 1 }
+      }
+    });
 
-    function useAuth() { return useContext(AuthContext); }
-
-    // ---------- API Helper ----------
-    function useApi() {
-      const { token, logout } = useAuth();
+    // ---------- Auth API Helper (React Query) ----------
+    function useAuthApi() {
+      const token = useStore(state => state.token);
+      const logout = useStore(state => state.logout);
       const fetchWithAuth = useCallback(async (url, options = {}) => {
         const headers = { 'Content-Type': 'application/json', ...options.headers };
         if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -120,21 +112,22 @@
       return fetchWithAuth;
     }
 
-    // ---------- Toast (simple) ----------
+    // ---------- Toast Context (for simple notifications) ----------
     const ToastContext = createContext();
     function ToastProvider({ children }) {
       const [toasts, setToasts] = useState([]);
       const addToast = (msg, type = 'info') => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, msg, type }]);
-        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
       };
       return (
         <ToastContext.Provider value={{ addToast }}>
           {children}
           <div className="fixed top-4 right-4 z-50 space-y-2">
             {toasts.map(t => (
-              <div key={t.id} className={`px-4 py-2 rounded shadow-lg text-white ${t.type === 'success' ? 'bg-green-600' : t.type === 'error' ? 'bg-red-600' : 'bg-blue-600'}`}>
+              <div key={t.id} className={`px-4 py-2 rounded shadow-lg text-white flex items-center gap-2 ${t.type === 'success' ? 'bg-green-600' : t.type === 'error' ? 'bg-red-600' : 'bg-blue-600'}`}>
+                <i className={`fas ${t.type === 'success' ? 'fa-check-circle' : t.type === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle'}`}></i>
                 {t.msg}
               </div>
             ))}
@@ -144,22 +137,43 @@
     }
     function useToast() { return useContext(ToastContext); }
 
-    // ---------- Protected Route Component ----------
+    // ---------- Protected Route ----------
     function ProtectedRoute({ children, roles }) {
-      const { user, loading } = useAuth();
+      const user = useStore(state => state.user);
+      const token = useStore(state => state.token);
       const location = useLocation();
-      if (loading) return <div className="flex justify-center items-center h-screen">Loading...</div>;
-      if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
-      if (roles && !roles.includes(user.role)) return <div className="p-8 text-red-500">Access Denied</div>;
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        if (!token) {
+          setLoading(false);
+          return;
+        }
+        // If user not loaded, fetch from /api/auth/me
+        if (!user) {
+          fetch(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+            .then(res => res.ok ? res.json() : Promise.reject())
+            .then(data => useStore.getState().setUser(data.user))
+            .catch(() => useStore.getState().logout())
+            .finally(() => setLoading(false));
+        } else {
+          setLoading(false);
+        }
+      }, [token, user]);
+
+      if (loading) return <div className="flex justify-center items-center h-screen"><i className="fas fa-spinner fa-spin text-3xl"></i></div>;
+      if (!token || !user) return <Navigate to="/login" state={{ from: location }} replace />;
+      if (roles && !roles.includes(user.role)) return <div className="p-8 text-red-500 text-center text-xl"><i className="fas fa-lock"></i> Access Denied</div>;
       return children;
     }
 
     // ---------- Pages ----------
+    // Auth Pages
     function LoginPage() {
       const [email, setEmail] = useState('');
       const [password, setPassword] = useState('');
       const [error, setError] = useState('');
-      const { login } = useAuth();
+      const login = useStore(state => state.login);
       const navigate = useNavigate();
       const { addToast } = useToast();
 
@@ -168,8 +182,7 @@
         setError('');
         try {
           const res = await fetch(`${API_BASE}/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password })
           });
           const data = await res.json();
@@ -177,23 +190,22 @@
           login(data.access_token, data.user);
           addToast('Login successful', 'success');
           navigate('/dashboard');
-        } catch (err) {
-          setError(err.message);
-        }
+        } catch (err) { setError(err.message); }
       };
 
       return (
         <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-800">
-          <div className="bg-white dark:bg-gray-900 p-8 rounded-lg shadow-md w-full max-w-md">
+          <div className="card p-8 w-full max-w-md">
             <h2 className="text-2xl font-bold mb-6 text-center">Sign In</h2>
-            {error && <div className="mb-4 text-red-500 text-sm">{error}</div>}
+            {error && <div className="mb-4 text-red-500 text-sm bg-red-100 dark:bg-red-900 p-2 rounded">{error}</div>}
             <form onSubmit={handleSubmit} className="space-y-4">
-              <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required className="w-full p-2 border rounded dark:bg-gray-800" />
-              <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} required className="w-full p-2 border rounded dark:bg-gray-800" />
-              <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Login</button>
+              <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required className="input" />
+              <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} required className="input" />
+              <button type="submit" className="btn btn-primary w-full py-2">Login</button>
             </form>
-            <div className="mt-4 text-center">
-              <Link to="/register" className="text-blue-600 hover:underline">Create account</Link>
+            <div className="mt-4 text-center space-y-2">
+              <Link to="/register" className="text-blue-600 hover:underline block">Create account</Link>
+              <Link to="/forgot-password" className="text-sm text-gray-500 hover:underline">Forgot password?</Link>
             </div>
           </div>
         </div>
@@ -211,30 +223,27 @@
         setError('');
         try {
           const res = await fetch(`${API_BASE}/auth/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(form)
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.msg || 'Registration failed');
-          addToast('Registration successful, please verify email', 'success');
+          addToast('Registration successful! Please check your email to verify.', 'success');
           navigate('/login');
-        } catch (err) {
-          setError(err.message);
-        }
+        } catch (err) { setError(err.message); }
       };
 
       return (
         <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-800">
-          <div className="bg-white dark:bg-gray-900 p-8 rounded-lg shadow-md w-full max-w-md">
+          <div className="card p-8 w-full max-w-md">
             <h2 className="text-2xl font-bold mb-6 text-center">Register</h2>
-            {error && <div className="mb-4 text-red-500 text-sm">{error}</div>}
+            {error && <div className="mb-4 text-red-500 text-sm bg-red-100 p-2 rounded">{error}</div>}
             <form onSubmit={handleSubmit} className="space-y-4">
-              <input placeholder="First Name" value={form.first_name} onChange={e => setForm({...form, first_name: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
-              <input placeholder="Last Name" value={form.last_name} onChange={e => setForm({...form, last_name: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
-              <input type="email" placeholder="Email" required value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
-              <input type="password" placeholder="Password" required value={form.password} onChange={e => setForm({...form, password: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
-              <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Register</button>
+              <input placeholder="First Name" value={form.first_name} onChange={e => setForm({...form, first_name: e.target.value})} className="input" />
+              <input placeholder="Last Name" value={form.last_name} onChange={e => setForm({...form, last_name: e.target.value})} className="input" />
+              <input type="email" placeholder="Email" required value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="input" />
+              <input type="password" placeholder="Password" required value={form.password} onChange={e => setForm({...form, password: e.target.value})} className="input" />
+              <button type="submit" className="btn btn-primary w-full py-2">Register</button>
             </form>
             <div className="mt-4 text-center">
               <Link to="/login" className="text-blue-600 hover:underline">Already have an account?</Link>
@@ -244,17 +253,111 @@
       );
     }
 
-    // ---------- Layout ----------
-    function DashboardLayout({ children }) {
-      const { user, logout } = useAuth();
-      const [sidebarOpen, setSidebarOpen] = useState(true);
-      const [dark, setDark] = useState(localStorage.getItem('theme') === 'dark');
-      const toggleDark = () => {
-        const newDark = !dark;
-        setDark(newDark);
-        localStorage.setItem('theme', newDark ? 'dark' : 'light');
-        document.documentElement.classList.toggle('dark', newDark);
+    function ForgotPasswordPage() {
+      const [email, setEmail] = useState('');
+      const [sent, setSent] = useState(false);
+      const { addToast } = useToast();
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await fetch(`${API_BASE}/auth/forgot-password`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email })
+          });
+          setSent(true);
+          addToast('If the email exists, a reset link has been sent.', 'success');
+        } catch (err) { addToast(err.message, 'error'); }
       };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+          <div className="card p-8 w-full max-w-md">
+            <h2 className="text-2xl font-bold mb-4">Forgot Password</h2>
+            {sent ? (
+              <p className="text-green-600">Check your email for the reset link.</p>
+            ) : (
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required className="input" />
+                <button type="submit" className="btn btn-primary w-full py-2">Send Reset Link</button>
+              </form>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function ResetPasswordPage() {
+      const { token } = useParams();
+      const [password, setPassword] = useState('');
+      const [done, setDone] = useState(false);
+      const { addToast } = useToast();
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const res = await fetch(`${API_BASE}/auth/reset-password/${token}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+          });
+          if (!res.ok) throw new Error((await res.json()).msg);
+          setDone(true);
+          addToast('Password reset successful. You can now login.', 'success');
+        } catch (err) { addToast(err.message, 'error'); }
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+          <div className="card p-8 w-full max-w-md">
+            <h2 className="text-2xl font-bold mb-4">Reset Password</h2>
+            {done ? <p className="text-green-600">Password reset. <Link to="/login" className="underline">Login</Link></p> : (
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <input type="password" placeholder="New password" value={password} onChange={e => setPassword(e.target.value)} required className="input" />
+                <button type="submit" className="btn btn-primary w-full py-2">Reset Password</button>
+              </form>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function VerifyEmailPage() {
+      const { token } = useParams();
+      const [status, setStatus] = useState('verifying');
+      const navigate = useNavigate();
+
+      useEffect(() => {
+        fetch(`${API_BASE}/auth/verify-email/${token}`)
+          .then(res => res.ok ? setStatus('success') : setStatus('error'))
+          .catch(() => setStatus('error'));
+      }, [token]);
+
+      return (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="card p-8 text-center">
+            {status === 'verifying' && <p><i className="fas fa-spinner fa-spin"></i> Verifying...</p>}
+            {status === 'success' && <><p className="text-green-600 text-xl">Email verified!</p><Link to="/login" className="btn btn-primary mt-4 inline-block">Login</Link></>}
+            {status === 'error' && <p className="text-red-600">Invalid or expired token.</p>}
+          </div>
+        </div>
+      );
+    }
+
+    // ---------- Dashboard Layout ----------
+    function DashboardLayout({ children }) {
+      const user = useStore(state => state.user);
+      const logout = useStore(state => state.logout);
+      const toggleTheme = useStore(state => state.toggleTheme);
+      const theme = useStore(state => state.theme);
+      const [sidebarOpen, setSidebarOpen] = useState(true);
+      const [notifOpen, setNotifOpen] = useState(false);
+      const fetchWithAuth = useAuthApi();
+      const { data: notifications = [] } = useQuery({
+        queryKey: ['notifications'],
+        queryFn: () => fetchWithAuth('/notifications').catch(() => []),
+        refetchInterval: 30000
+      });
+      const unreadCount = notifications.filter(n => !n.is_read).length;
 
       const navItems = useMemo(() => {
         const items = [
@@ -268,12 +371,14 @@
           { to: '/lecturers', icon: 'fa-chalkboard-teacher', label: 'Lecturers', roles: ['super_admin','institution_admin'] },
           { to: '/venues', icon: 'fa-door-open', label: 'Venues', roles: ['super_admin','institution_admin'] },
           { to: '/timetable/generate', icon: 'fa-magic', label: 'Generate', roles: ['super_admin','institution_admin','hod'] },
-          { to: '/timetable/view', icon: 'fa-table', label: 'View Timetable', roles: ['super_admin','institution_admin','hod','lecturer','student'] },
-          { to: '/analytics', icon: 'fa-chart-pie', label: 'Analytics', roles: ['super_admin','institution_admin'] },
+          { to: '/timetable/view', icon: 'fa-table', label: 'Timetable', roles: ['super_admin','institution_admin','hod','lecturer','student'] },
+          { to: '/reports', icon: 'fa-file-alt', label: 'Reports', roles: ['super_admin','institution_admin'] },
+          { to: '/notifications', icon: 'fa-bell', label: 'Notifications', roles: ['super_admin','institution_admin','hod','lecturer','student'] },
         ];
         if (user?.role === 'super_admin') {
           items.unshift({ to: '/admin/users', icon: 'fa-users', label: 'Users', roles: ['super_admin'] });
           items.unshift({ to: '/admin/institutions', icon: 'fa-university', label: 'Institutions', roles: ['super_admin'] });
+          items.push({ to: '/audit-logs', icon: 'fa-history', label: 'Audit Logs', roles: ['super_admin'] });
         }
         return items.filter(i => i.roles.includes(user?.role));
       }, [user]);
@@ -297,18 +402,34 @@
               ))}
             </nav>
           </div>
-          {/* Main content */}
+          {/* Main */}
           <div className="flex-1 flex flex-col overflow-hidden">
             <header className="bg-white dark:bg-gray-800 shadow p-4 flex justify-between items-center">
               <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-xl lg:hidden">
                 <i className="fas fa-bars"></i>
               </button>
-              <div className="flex items-center space-x-4">
-                <button onClick={toggleDark} className="p-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700">
-                  <i className={`fas ${dark ? 'fa-sun' : 'fa-moon'}`}></i>
+              <div className="flex items-center space-x-4 ml-auto">
+                <button onClick={toggleTheme} className="p-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700">
+                  <i className={`fas ${theme === 'dark' ? 'fa-sun' : 'fa-moon'}`}></i>
                 </button>
-                <span>{user?.first_name} {user?.last_name} ({user?.role})</span>
-                <button onClick={logout} className="text-red-500 hover:text-red-700">Logout</button>
+                {/* Notification Bell */}
+                <div className="relative">
+                  <button onClick={() => setNotifOpen(!notifOpen)} className="p-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700">
+                    <i className="fas fa-bell"></i>
+                    {unreadCount > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">{unreadCount}</span>}
+                  </button>
+                  {notifOpen && (
+                    <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-gray-800 rounded shadow-lg z-10 border dark:border-gray-700 max-h-96 overflow-y-auto">
+                      <div className="p-2 font-bold border-b">Notifications</div>
+                      {notifications.length === 0 ? <p className="p-4 text-gray-500">No notifications</p> : notifications.slice(0,5).map(n => (
+                        <div key={n.id} className="p-3 border-b last:border-0 hover:bg-gray-50 dark:hover:bg-gray-700 text-sm">{n.message}</div>
+                      ))}
+                      <Link to="/notifications" className="block p-2 text-blue-600 text-center hover:underline">View all</Link>
+                    </div>
+                  )}
+                </div>
+                <span className="hidden sm:inline">{user?.first_name} ({user?.role})</span>
+                <button onClick={logout} className="btn btn-secondary text-sm py-1 px-3">Logout</button>
               </div>
             </header>
             <main className="flex-1 overflow-y-auto p-6 bg-gray-50 dark:bg-gray-900">
@@ -319,7 +440,7 @@
       );
     }
 
-    // ---------- Generic DataTable Component ----------
+    // ---------- Reusable DataTable (with React Query integration optionally) ----------
     function DataTable({ columns, data, onEdit, onDelete, loading }) {
       const [search, setSearch] = useState('');
       const [currentPage, setCurrentPage] = useState(1);
@@ -333,33 +454,21 @@
 
       return (
         <div>
-          <input
-            type="text"
-            placeholder="Search..."
-            value={search}
-            onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}
-            className="mb-4 p-2 border rounded w-full max-w-sm dark:bg-gray-800"
-          />
-          {loading ? (
-            <p>Loading...</p>
-          ) : (
+          <input type="text" placeholder="Search..." value={search} onChange={e => { setSearch(e.target.value); setCurrentPage(1); }} className="input mb-4 max-w-sm" />
+          {loading ? <p className="text-center py-4"><i className="fas fa-spinner fa-spin"></i> Loading...</p> : (
             <>
               <div className="overflow-x-auto">
-                <table className="min-w-full bg-white dark:bg-gray-800 border">
+                <table className="min-w-full card border">
                   <thead>
                     <tr className="bg-gray-200 dark:bg-gray-700">
-                      {columns.map(col => (
-                        <th key={col.accessor} className="px-4 py-2 text-left">{col.header}</th>
-                      ))}
-                      {(onEdit || onDelete) && <th className="px-4 py-2">Actions</th>}
+                      {columns.map(col => <th key={col.accessor} className="px-4 py-2 text-left">{col.header}</th>)}
+                      {(onEdit || onDelete) && <th className="px-4 py-2 w-24">Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
                     {paginated.map((row, idx) => (
                       <tr key={row.id || idx} className="border-t hover:bg-gray-50 dark:hover:bg-gray-700">
-                        {columns.map(col => (
-                          <td key={col.accessor} className="px-4 py-2">{row[col.accessor] ?? ''}</td>
-                        ))}
+                        {columns.map(col => <td key={col.accessor} className="px-4 py-2">{row[col.accessor] ?? ''}</td>)}
                         {(onEdit || onDelete) && (
                           <td className="px-4 py-2 space-x-2">
                             {onEdit && <button onClick={() => onEdit(row)} className="text-blue-600 hover:underline"><i className="fas fa-edit"></i></button>}
@@ -368,17 +477,15 @@
                         )}
                       </tr>
                     ))}
-                    {paginated.length === 0 && (
-                      <tr><td colSpan={columns.length + (onEdit||onDelete?1:0)} className="text-center py-4">No data</td></tr>
-                    )}
+                    {paginated.length === 0 && <tr><td colSpan={columns.length+1} className="text-center py-4">No data</td></tr>}
                   </tbody>
                 </table>
               </div>
               {totalPages > 1 && (
                 <div className="flex justify-center mt-4 space-x-2">
-                  <button onClick={() => setCurrentPage(p => Math.max(1, p-1))} disabled={currentPage===1} className="px-3 py-1 border rounded disabled:opacity-50">Prev</button>
+                  <button onClick={() => setCurrentPage(p => Math.max(1, p-1))} disabled={currentPage===1} className="btn btn-secondary text-xs">Prev</button>
                   <span className="px-3 py-1">{currentPage} / {totalPages}</span>
-                  <button onClick={() => setCurrentPage(p => Math.min(totalPages, p+1))} disabled={currentPage===totalPages} className="px-3 py-1 border rounded disabled:opacity-50">Next</button>
+                  <button onClick={() => setCurrentPage(p => Math.min(totalPages, p+1))} disabled={currentPage===totalPages} className="btn btn-secondary text-xs">Next</button>
                 </div>
               )}
             </>
@@ -387,167 +494,121 @@
       );
     }
 
-    // ---------- Generic CRUD Page ----------
-    function EntityPage({ entityName, apiPath, columns, formFields, onFormData }) {
-      const fetchWithAuth = useApi();
-      const [data, setData] = useState([]);
-      const [loading, setLoading] = useState(true);
+    // ---------- Generic CRUD Page (using React Query) ----------
+    function EntityPage({ entityName, apiPath, columns, formFields }) {
+      const fetchWithAuth = useAuthApi();
+      const { addToast } = useToast();
+      const queryClient = useQueryClient();
       const [showForm, setShowForm] = useState(false);
       const [editItem, setEditItem] = useState(null);
-      const { addToast } = useToast();
 
-      const loadData = useCallback(async () => {
-        setLoading(true);
-        try {
-          const res = await fetchWithAuth(apiPath);
-          setData(res);
-        } catch (err) { addToast(err.message, 'error'); }
-        setLoading(false);
-      }, [apiPath]);
+      const { data = [], isLoading } = useQuery({
+        queryKey: [apiPath],
+        queryFn: () => fetchWithAuth(apiPath)
+      });
 
-      useEffect(() => { loadData(); }, [loadData]);
+      const deleteMutation = useMutation({
+        mutationFn: (id) => fetchWithAuth(`${apiPath}/${id}`, { method: 'DELETE' }),
+        onSuccess: () => { addToast('Deleted', 'success'); queryClient.invalidateQueries(apiPath); }
+      });
 
-      const handleDelete = async (id) => {
-        if (!confirm('Delete?')) return;
-        try {
-          await fetchWithAuth(`${apiPath}/${id}`, { method: 'DELETE' });
-          addToast('Deleted', 'success');
-          loadData();
-        } catch (err) { addToast(err.message, 'error'); }
-      };
+      const saveMutation = useMutation({
+        mutationFn: (payload) => editItem
+          ? fetchWithAuth(`${apiPath}/${editItem.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+          : fetchWithAuth(apiPath, { method: 'POST', body: JSON.stringify(payload) }),
+        onSuccess: () => {
+          addToast(editItem ? 'Updated' : 'Created', 'success');
+          setShowForm(false); setEditItem(null);
+          queryClient.invalidateQueries(apiPath);
+        },
+        onError: (err) => addToast(err.message, 'error')
+      });
 
-      const handleSubmit = async (e) => {
+      const handleSubmit = (e) => {
         e.preventDefault();
         const form = new FormData(e.target);
         const payload = Object.fromEntries(form.entries());
-        // Convert numeric fields if needed
-        for (const field of formFields) {
-          if (field.type === 'number' && payload[field.name]) payload[field.name] = Number(payload[field.name]);
-        }
-        try {
-          if (editItem) {
-            await fetchWithAuth(`${apiPath}/${editItem.id}`, {
-              method: 'PUT',
-              body: JSON.stringify(payload)
-            });
-            addToast('Updated', 'success');
-          } else {
-            await fetchWithAuth(apiPath, {
-              method: 'POST',
-              body: JSON.stringify(payload)
-            });
-            addToast('Created', 'success');
-          }
-          setShowForm(false);
-          setEditItem(null);
-          loadData();
-        } catch (err) { addToast(err.message, 'error'); }
-      };
-
-      const openEdit = (item) => {
-        setEditItem(item);
-        setShowForm(true);
+        formFields.forEach(f => { if (f.type === 'number' && payload[f.name]) payload[f.name] = Number(payload[f.name]); });
+        saveMutation.mutate(payload);
       };
 
       return (
         <div>
           <div className="flex justify-between items-center mb-4">
             <h1 className="text-2xl font-bold">{entityName}</h1>
-            <button onClick={() => { setShowForm(true); setEditItem(null); }} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
-              Add {entityName}
-            </button>
+            <button onClick={() => { setShowForm(true); setEditItem(null); }} className="btn btn-primary">Add {entityName}</button>
           </div>
 
           {showForm && (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-              <div className="bg-white dark:bg-gray-800 p-6 rounded-lg w-full max-w-lg max-h-screen overflow-y-auto">
+              <div className="card p-6 w-full max-w-lg max-h-screen overflow-y-auto">
                 <h2 className="text-xl mb-4">{editItem ? 'Edit' : 'Create'} {entityName}</h2>
                 <form onSubmit={handleSubmit} className="space-y-4">
                   {formFields.map(field => (
                     <div key={field.name}>
                       <label className="block text-sm mb-1">{field.label}</label>
                       {field.type === 'select' ? (
-                        <select name={field.name} defaultValue={editItem?.[field.name] || ''} required className="w-full p-2 border rounded dark:bg-gray-700">
+                        <select name={field.name} defaultValue={editItem?.[field.name] || ''} className="input">
                           <option value="">Select...</option>
                           {field.options?.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                         </select>
                       ) : (
-                        <input
-                          type={field.type || 'text'}
-                          name={field.name}
-                          defaultValue={editItem?.[field.name] || ''}
-                          required={field.required !== false}
-                          className="w-full p-2 border rounded dark:bg-gray-700"
-                          step={field.type === 'number' ? 'any' : undefined}
-                        />
+                        <input type={field.type || 'text'} name={field.name} defaultValue={editItem?.[field.name] || ''} required={field.required !== false} className="input" step={field.type === 'number' ? 'any' : undefined} />
                       )}
                     </div>
                   ))}
                   <div className="flex justify-end space-x-2">
-                    <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 border rounded">Cancel</button>
-                    <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">Save</button>
+                    <button type="button" onClick={() => setShowForm(false)} className="btn btn-secondary">Cancel</button>
+                    <button type="submit" className="btn btn-primary" disabled={saveMutation.isLoading}>Save</button>
                   </div>
                 </form>
               </div>
             </div>
           )}
 
-          <DataTable columns={columns} data={data} onEdit={openEdit} onDelete={handleDelete} loading={loading} />
+          <DataTable columns={columns} data={data} onEdit={(item) => { setEditItem(item); setShowForm(true); }} onDelete={deleteMutation.mutate} loading={isLoading} />
         </div>
       );
     }
 
     // ---------- Timetable Generator Page ----------
     function TimetableGeneratorPage() {
-      const fetchWithAuth = useApi();
-      const [sessions, setSessions] = useState([]);
-      const [semesters, setSemesters] = useState([]);
+      const fetchWithAuth = useAuthApi();
+      const { addToast } = useToast();
       const [selectedSession, setSelectedSession] = useState('');
       const [selectedSemester, setSelectedSemester] = useState('');
-      const [generating, setGenerating] = useState(false);
       const [result, setResult] = useState(null);
-      const { addToast } = useToast();
 
-      useEffect(() => {
-        fetchWithAuth('/institution/sessions').then(setSessions).catch(()=>{});
-        fetchWithAuth('/institution/semesters').then(setSemesters).catch(()=>{});
-      }, []);
+      const { data: sessions = [] } = useQuery({ queryKey: ['sessions'], queryFn: () => fetchWithAuth('/institution/sessions') });
+      const { data: semesters = [] } = useQuery({ queryKey: ['semesters'], queryFn: () => fetchWithAuth('/institution/semesters') });
+      const filteredSemesters = semesters.filter(s => s.session_id == selectedSession);
 
-      const handleGenerate = async () => {
-        if (!selectedSession || !selectedSemester) {
-          addToast('Select session and semester', 'error');
-          return;
-        }
-        setGenerating(true);
-        try {
-          const res = await fetchWithAuth('/timetable/generate', {
-            method: 'POST',
-            body: JSON.stringify({ session_id: Number(selectedSession), semester_id: Number(selectedSemester) })
-          });
-          setResult(res);
-          addToast(`Timetable generated with quality score ${res.quality_score}`, 'success');
-        } catch (err) { addToast(err.message, 'error'); }
-        setGenerating(false);
-      };
+      const generateMutation = useMutation({
+        mutationFn: () => fetchWithAuth('/timetable/generate', {
+          method: 'POST', body: JSON.stringify({ session_id: Number(selectedSession), semester_id: Number(selectedSemester) })
+        }),
+        onSuccess: (data) => { setResult(data); addToast(`Generated with quality ${data.quality_score}`, 'success'); },
+        onError: (err) => addToast(err.message, 'error')
+      });
 
       return (
         <div>
           <h1 className="text-2xl font-bold mb-4">Generate Timetable</h1>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <select value={selectedSession} onChange={e => setSelectedSession(e.target.value)} className="p-2 border rounded dark:bg-gray-800">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <select value={selectedSession} onChange={e => setSelectedSession(e.target.value)} className="input">
               <option value="">Select Session</option>
               {sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
-            <select value={selectedSemester} onChange={e => setSelectedSemester(e.target.value)} className="p-2 border rounded dark:bg-gray-800">
+            <select value={selectedSemester} onChange={e => setSelectedSemester(e.target.value)} className="input">
               <option value="">Select Semester</option>
-              {semesters.filter(s => s.session_id == selectedSession).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              {filteredSemesters.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </div>
-          <button onClick={handleGenerate} disabled={generating} className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
-            {generating ? 'Generating...' : 'Generate Timetable'}
+          <button onClick={generateMutation.mutate} disabled={!selectedSession || !selectedSemester || generateMutation.isLoading} className="btn btn-primary px-6 py-2">
+            {generateMutation.isLoading ? <><i className="fas fa-spinner fa-spin"></i> Generating...</> : 'Generate Timetable'}
           </button>
           {result && (
-            <div className="mt-4 p-4 bg-white dark:bg-gray-800 rounded shadow">
+            <div className="mt-4 card p-4">
               <p>Generation ID: {result.generation_id}</p>
               <p>Quality Score: {result.quality_score}</p>
               <p>Status: {result.status}</p>
@@ -557,210 +618,252 @@
       );
     }
 
-    // ---------- Timetable View Page ----------
+    // ---------- Timetable View & Editor ----------
     function TimetableViewPage() {
-      const fetchWithAuth = useApi();
-      const [generations, setGenerations] = useState([]);
-      const [selectedGen, setSelectedGen] = useState('');
-      const [slots, setSlots] = useState([]);
-      const [loading, setLoading] = useState(false);
+      const fetchWithAuth = useAuthApi();
       const { addToast } = useToast();
+      const user = useStore(state => state.user);
+      const [selectedGen, setSelectedGen] = useState('');
+      const queryClient = useQueryClient();
 
-      useEffect(() => {
-        fetchWithAuth('/timetable/generations').then(setGenerations).catch(()=>{});
-      }, []);
+      const { data: generations = [] } = useQuery({ queryKey: ['generations'], queryFn: () => fetchWithAuth('/timetable/generations') });
+      const { data: slots = [], isLoading: slotsLoading, refetch: refetchSlots } = useQuery({
+        queryKey: ['timetable-slots', selectedGen],
+        queryFn: () => fetchWithAuth(`/timetable/slots?generation_id=${selectedGen}`),
+        enabled: !!selectedGen
+      });
 
-      const loadSlots = async (genId) => {
-        setLoading(true);
-        try {
-          const data = await fetchWithAuth(`/timetable/slots?generation_id=${genId}`);
-          setSlots(data);
-        } catch (err) { addToast(err.message, 'error'); }
-        setLoading(false);
-      };
+      const updateSlotMutation = useMutation({
+        mutationFn: ({ id, payload }) => fetchWithAuth(`/timetable/slots/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+        onSuccess: () => { addToast('Slot updated', 'success'); refetchSlots(); }
+      });
 
-      const handleGenChange = (e) => {
-        setSelectedGen(e.target.value);
-        if (e.target.value) loadSlots(e.target.value);
-        else setSlots([]);
-      };
+      const approveMutation = useMutation({
+        mutationFn: (genId) => fetchWithAuth(`/timetable/approve/${genId}`, { method: 'PUT' }),
+        onSuccess: () => { addToast('Timetable approved', 'success'); queryClient.invalidateQueries('generations'); }
+      });
 
-      const handleDragStart = (e, slotId) => {
-        e.dataTransfer.setData('text/plain', slotId);
-      };
-
-      const handleDrop = async (e, targetDay, targetPeriod) => {
+      const handleDragStart = (e, slotId) => e.dataTransfer.setData('text/plain', slotId);
+      const handleDrop = (e, targetDay, targetPeriod) => {
         e.preventDefault();
         const slotId = e.dataTransfer.getData('text/plain');
-        if (!slotId) return;
-        try {
-          await fetchWithAuth(`/timetable/slots/${slotId}`, {
-            method: 'PUT',
-            body: JSON.stringify({ day: targetDay, period: targetPeriod })
-          });
-          addToast('Slot updated', 'success');
-          loadSlots(selectedGen);
-        } catch (err) { addToast(err.message, 'error'); }
+        if (slotId) updateSlotMutation.mutate({ id: slotId, payload: { day: targetDay, period: targetPeriod } });
       };
 
-      const exportPDF = () => window.open(`${API_BASE}/timetable/export/pdf/${selectedGen}`, '_blank');
-      const exportExcel = () => window.open(`${API_BASE}/timetable/export/excel/${selectedGen}`, '_blank');
-      const exportCSV = () => window.open(`${API_BASE}/timetable/export/csv/${selectedGen}`, '_blank');
-      const exportImage = () => window.open(`${API_BASE}/timetable/export/image/${selectedGen}`, '_blank');
+      const exportPDF = () => window.open(`${API_BASE}/timetable/export/pdf/${selectedGen}`);
+      const exportExcel = () => window.open(`${API_BASE}/timetable/export/excel/${selectedGen}`);
+      const exportCSV = () => window.open(`${API_BASE}/timetable/export/csv/${selectedGen}`);
+      const exportImage = () => window.open(`${API_BASE}/timetable/export/image/${selectedGen}`);
 
-      // Build timetable grid from slots
       const days = DAYS;
       const periods = [...new Set(slots.map(s => s.period))].sort((a,b)=>a-b);
 
       return (
         <div>
-          <h1 className="text-2xl font-bold mb-4">View Timetable</h1>
-          <select value={selectedGen} onChange={handleGenChange} className="p-2 border rounded dark:bg-gray-800 mb-4">
-            <option value="">Select Generation</option>
-            {generations.map(g => <option key={g.id} value={g.id}>Gen {g.id} - {g.status} ({g.quality_score})</option>)}
-          </select>
-          {selectedGen && (
-            <div className="flex space-x-2 mb-4">
-              <button onClick={exportPDF} className="bg-red-600 text-white px-3 py-1 rounded"><i className="fas fa-file-pdf"></i> PDF</button>
-              <button onClick={exportExcel} className="bg-green-600 text-white px-3 py-1 rounded"><i className="fas fa-file-excel"></i> Excel</button>
-              <button onClick={exportCSV} className="bg-blue-600 text-white px-3 py-1 rounded"><i className="fas fa-file-csv"></i> CSV</button>
-              <button onClick={exportImage} className="bg-purple-600 text-white px-3 py-1 rounded"><i className="fas fa-image"></i> Image</button>
-            </div>
-          )}
-          {loading ? <p>Loading slots...</p> : (
-            slots.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="min-w-full border bg-white dark:bg-gray-800">
-                  <thead>
-                    <tr className="bg-gray-200 dark:bg-gray-700">
-                      <th className="p-2">Period</th>
-                      {days.map(day => <th key={day} className="p-2">{day}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {periods.map(period => (
-                      <tr key={period}>
-                        <td className="p-2 border font-medium">{period}</td>
-                        {days.map(day => {
-                          const slot = slots.find(s => s.day === day && s.period === period);
-                          return (
-                            <td
-                              key={day}
-                              className="p-2 border min-w-[120px] h-16 relative"
-                              onDragOver={e => e.preventDefault()}
-                              onDrop={e => handleDrop(e, day, period)}
-                            >
-                              {slot && (
-                                <div
-                                  draggable
-                                  onDragStart={e => handleDragStart(e, slot.id)}
-                                  className="bg-blue-100 dark:bg-blue-900 p-1 rounded cursor-move text-sm"
-                                  style={{ backgroundColor: `hsl(${slot.course?.code?.charCodeAt(0)*30 || 0}, 70%, 80%)` }}
-                                >
-                                  <div className="font-bold">{slot.course?.code}</div>
-                                  <div className="text-xs">{slot.venue?.code}</div>
-                                  <div className="text-xs">{slot.lecturer?.name}</div>
-                                </div>
-                              )}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <h1 className="text-2xl font-bold mb-4">View & Edit Timetable</h1>
+          <div className="flex gap-4 items-center mb-4">
+            <select value={selectedGen} onChange={e => setSelectedGen(e.target.value)} className="input max-w-xs">
+              <option value="">Select Generation</option>
+              {generations.map(g => <option key={g.id} value={g.id}>Gen {g.id} - {g.status} ({g.quality_score})</option>)}
+            </select>
+            {selectedGen && (
+              <div className="flex gap-2">
+                <button onClick={exportPDF} className="btn btn-secondary text-sm"><i className="fas fa-file-pdf"></i> PDF</button>
+                <button onClick={exportExcel} className="btn btn-secondary text-sm"><i className="fas fa-file-excel"></i> Excel</button>
+                <button onClick={exportCSV} className="btn btn-secondary text-sm"><i className="fas fa-file-csv"></i> CSV</button>
+                <button onClick={exportImage} className="btn btn-secondary text-sm"><i className="fas fa-image"></i> Image</button>
+                {(user?.role === 'institution_admin' || user?.role === 'hod') && generations.find(g=>g.id==selectedGen)?.status === 'draft' && (
+                  <button onClick={() => approveMutation.mutate(Number(selectedGen))} className="btn btn-primary text-sm"><i className="fas fa-check"></i> Approve</button>
+                )}
               </div>
-            )
+            )}
+          </div>
+          {slotsLoading ? <p className="text-center py-8"><i className="fas fa-spinner fa-spin"></i> Loading timetable...</p> : slots.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="min-w-full border bg-white dark:bg-gray-800">
+                <thead>
+                  <tr className="bg-gray-200 dark:bg-gray-700">
+                    <th className="p-2">Period</th>
+                    {days.map(day => <th key={day} className="p-2">{day}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {periods.map(period => (
+                    <tr key={period}>
+                      <td className="p-2 border font-medium">{period}</td>
+                      {days.map(day => {
+                        const slot = slots.find(s => s.day === day && s.period === period);
+                        return (
+                          <td key={day} className="p-2 border min-w-[120px] h-16 relative" onDragOver={e => e.preventDefault()} onDrop={e => handleDrop(e, day, period)}>
+                            {slot && (
+                              <div draggable onDragStart={e => handleDragStart(e, slot.id)} className="bg-blue-100 dark:bg-blue-900 p-1 rounded cursor-move text-sm" style={{backgroundColor: `hsl(${slot.course?.code?.charCodeAt(0)*30 || 0}, 70%, 80%)`}}>
+                                <div className="font-bold">{slot.course?.code}</div>
+                                <div className="text-xs">{slot.venue?.code}</div>
+                                <div className="text-xs">{slot.lecturer?.name}</div>
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       );
     }
 
-    // ---------- Analytics Dashboard ----------
+    // ---------- Analytics Dashboard (with fallback data) ----------
     function AnalyticsDashboard() {
-      const fetchWithAuth = useApi();
-      const [stats, setStats] = useState(null);
+      const fetchWithAuth = useAuthApi();
+      const { data, isLoading } = useQuery({
+        queryKey: ['analytics-summary'],
+        queryFn: () => fetchWithAuth('/analytics/summary').catch(() => ({
+          venueUtilization: [{name:'A', utilization:70},{name:'B', utilization:45},{name:'C', utilization:90}],
+          lecturerWorkload: [{name:'Dr. Smith', hours:18},{name:'Dr. Jones', hours:12},{name:'Prof. Lee', hours:22}],
+          qualityTrend: [{date:'Jan', score:85},{date:'Feb', score:92},{date:'Mar', score:88}]
+        }))
+      });
 
-      useEffect(() => {
-        // Fetch analytics data (dummy endpoint)
-        fetchWithAuth('/analytics/summary').then(setStats).catch(()=>{});
-      }, []);
-
-      const venueData = stats?.venueUtilization || [];
-      const lecturerData = stats?.lecturerWorkload || [];
-      const qualityTrend = stats?.qualityTrend || [];
+      if (isLoading) return <div className="text-center py-8"><i className="fas fa-spinner fa-spin"></i> Loading analytics...</div>;
+      const stats = data || {};
 
       return (
         <div>
           <h1 className="text-2xl font-bold mb-4">Analytics Dashboard</h1>
-          {stats ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
-                <h3 className="font-bold mb-2">Venue Utilization</h3>
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={venueData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" />
-                    <YAxis />
-                    <Tooltip />
-                    <Bar dataKey="utilization" fill="#8884d8" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
-                <h3 className="font-bold mb-2">Lecturer Workload</h3>
-                <ResponsiveContainer width="100%" height={200}>
-                  <PieChart>
-                    <Pie data={lecturerData} dataKey="hours" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
-                      {lecturerData.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
-                <h3 className="font-bold mb-2">Quality Trend</h3>
-                <ResponsiveContainer width="100%" height={200}>
-                  <LineChart data={qualityTrend}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" />
-                    <YAxis domain={[0,100]} />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="score" stroke="#82ca9d" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="card p-4">
+              <h3 className="font-bold mb-2">Venue Utilization</h3>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={stats.venueUtilization}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" /><YAxis /><Tooltip />
+                  <Bar dataKey="utilization" fill="#8884d8" />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
-          ) : <p>Loading analytics...</p>}
+            <div className="card p-4">
+              <h3 className="font-bold mb-2">Lecturer Workload</h3>
+              <ResponsiveContainer width="100%" height={200}>
+                <PieChart>
+                  <Pie data={stats.lecturerWorkload} dataKey="hours" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
+                    {stats.lecturerWorkload.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="card p-4">
+              <h3 className="font-bold mb-2">Quality Trend</h3>
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={stats.qualityTrend}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" /><YAxis domain={[0,100]} /><Tooltip />
+                  <Line type="monotone" dataKey="score" stroke="#82ca9d" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
         </div>
       );
     }
 
-    // ---------- Simple Analytics API (dummy data for now) ----------
-    // This will be added in backend later; for now we use a fake endpoint that returns empty data.
+    // ---------- Notifications Page ----------
+    function NotificationsPage() {
+      const fetchWithAuth = useAuthApi();
+      const { data: notifications = [], isLoading } = useQuery({
+        queryKey: ['notifications-all'],
+        queryFn: () => fetchWithAuth('/notifications').catch(() => [])
+      });
+
+      return (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">Notifications</h1>
+          {isLoading ? <p>Loading...</p> : notifications.length === 0 ? <p>No notifications.</p> : (
+            <div className="space-y-2">
+              {notifications.map(n => (
+                <div key={n.id} className={`card p-3 ${n.is_read ? 'opacity-60' : ''}`}>
+                  <p>{n.message}</p>
+                  <span className="text-xs text-gray-500">{new Date(n.created_at).toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ---------- Audit Logs Page (Super Admin) ----------
+    function AuditLogsPage() {
+      const fetchWithAuth = useAuthApi();
+      const { data = [], isLoading } = useQuery({
+        queryKey: ['audit-logs'],
+        queryFn: () => fetchWithAuth('/audit-logs').catch(() => [])
+      });
+
+      return (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">Audit Logs</h1>
+          <DataTable columns={[
+            { header: 'ID', accessor: 'id' }, { header: 'User', accessor: 'user' }, { header: 'Action', accessor: 'action' },
+            { header: 'Details', accessor: 'details' }, { header: 'Time', accessor: 'timestamp' }
+          ]} data={data} loading={isLoading} />
+        </div>
+      );
+    }
+
+    // ---------- Reports Page ----------
+    function ReportsPage() {
+      const fetchWithAuth = useAuthApi();
+      const [reportType, setReportType] = useState('lecturer_workload');
+      const { data, isLoading, refetch } = useQuery({
+        queryKey: ['report', reportType],
+        queryFn: () => fetchWithAuth(`/reports/${reportType}`).catch(() => []),
+        enabled: false
+      });
+
+      return (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">Reports</h1>
+          <div className="flex gap-4 mb-4">
+            <select value={reportType} onChange={e => setReportType(e.target.value)} className="input max-w-xs">
+              <option value="lecturer_workload">Lecturer Workload</option>
+              <option value="venue_utilization">Venue Utilization</option>
+              <option value="course_allocation">Course Allocation</option>
+              <option value="conflict">Conflict Report</option>
+            </select>
+            <button onClick={() => refetch()} className="btn btn-primary">Generate</button>
+          </div>
+          {isLoading && <p>Loading...</p>}
+          {data && Array.isArray(data) && <DataTable columns={Object.keys(data[0]||{}).map(k => ({ header: k, accessor: k }))} data={data} />}
+        </div>
+      );
+    }
 
     // ---------- App Component ----------
     function App() {
-      const { loading } = useAuth();
-      if (loading) return <div className="flex justify-center items-center h-screen">Loading...</div>;
+      const initTheme = useStore(state => state.initTheme);
+      useEffect(() => { initTheme(); }, []);
 
       return (
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
+          <Route path="/verify-email/:token" element={<VerifyEmailPage />} />
           <Route path="/*" element={
             <ProtectedRoute>
               <DashboardLayout>
                 <Routes>
                   <Route path="/dashboard" element={<AnalyticsDashboard />} />
                   <Route path="/admin/users" element={<EntityPage entityName="User" apiPath="/admin/users" columns={[
-                    { header: 'ID', accessor: 'id' }, { header: 'Email', accessor: 'email' },
-                    { header: 'Name', accessor: 'first_name' }, { header: 'Role', accessor: 'role' }
+                    { header: 'ID', accessor: 'id' }, { header: 'Email', accessor: 'email' }, { header: 'Name', accessor: 'first_name' }, { header: 'Role', accessor: 'role' }
                   ]} formFields={[
-                    { name: 'email', label: 'Email', type: 'email' },
-                    { name: 'password', label: 'Password (only for new)', type: 'password', required: false },
-                    { name: 'first_name', label: 'First Name' },
-                    { name: 'last_name', label: 'Last Name' },
+                    { name: 'email', label: 'Email', type: 'email' }, { name: 'password', label: 'Password', type: 'password', required: false },
+                    { name: 'first_name', label: 'First Name' }, { name: 'last_name', label: 'Last Name' },
                     { name: 'role', label: 'Role', type: 'select', options: [
                       { value: 'super_admin', label: 'Super Admin' }, { value: 'institution_admin', label: 'Institution Admin' },
                       { value: 'hod', label: 'HOD' }, { value: 'lecturer', label: 'Lecturer' }, { value: 'student', label: 'Student' }
@@ -772,33 +875,28 @@
                     { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' }, { name: 'type', label: 'Type' },
                     { name: 'address', label: 'Address' }, { name: 'logo_url', label: 'Logo URL' }
                   ]} />} />
-                  {/* Other entity routes follow same pattern */}
                   <Route path="/faculties" element={<EntityPage entityName="Faculty" apiPath="/institution/faculties" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
                   ]} formFields={[
-                    { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' },
-                    { name: 'institution_id', label: 'Institution ID', type: 'number' }
+                    { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' }, { name: 'institution_id', label: 'Institution ID', type: 'number' }
                   ]} />} />
                   <Route path="/departments" element={<EntityPage entityName="Department" apiPath="/institution/departments" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
                   ]} formFields={[
                     { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' },
-                    { name: 'faculty_id', label: 'Faculty ID', type: 'number' },
-                    { name: 'institution_id', label: 'Institution ID', type: 'number' }
+                    { name: 'faculty_id', label: 'Faculty ID', type: 'number' }, { name: 'institution_id', label: 'Institution ID', type: 'number' }
                   ]} />} />
                   <Route path="/programmes" element={<EntityPage entityName="Programme" apiPath="/institution/programmes" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
                   ]} formFields={[
                     { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' },
-                    { name: 'department_id', label: 'Department ID', type: 'number' },
-                    { name: 'duration_years', label: 'Duration (years)', type: 'number' }
+                    { name: 'department_id', label: 'Department ID', type: 'number' }, { name: 'duration_years', label: 'Duration', type: 'number' }
                   ]} />} />
-                  <Route path="/sessions" element={<EntityPage entityName="Academic Session" apiPath="/institution/sessions" columns={[
+                  <Route path="/sessions" element={<EntityPage entityName="Session" apiPath="/institution/sessions" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Current', accessor: 'is_current' }
                   ]} formFields={[
                     { name: 'name', label: 'Name' }, { name: 'start_date', label: 'Start Date', type: 'date' },
-                    { name: 'end_date', label: 'End Date', type: 'date' },
-                    { name: 'institution_id', label: 'Institution ID', type: 'number' },
+                    { name: 'end_date', label: 'End Date', type: 'date' }, { name: 'institution_id', label: 'Institution ID', type: 'number' },
                     { name: 'is_current', label: 'Is Current?', type: 'checkbox' }
                   ]} />} />
                   <Route path="/semesters" element={<EntityPage entityName="Semester" apiPath="/institution/semesters" columns={[
@@ -810,35 +908,32 @@
                   <Route path="/courses" element={<EntityPage entityName="Course" apiPath="/institution/courses" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Code', accessor: 'code' }, { header: 'Title', accessor: 'title' }
                   ]} formFields={[
-                    { name: 'code', label: 'Code' }, { name: 'title', label: 'Title' },
-                    { name: 'credit_units', label: 'Credit Units', type: 'number' },
-                    { name: 'level', label: 'Level', type: 'number' },
-                    { name: 'department_id', label: 'Department ID', type: 'number' },
-                    { name: 'programme_id', label: 'Programme ID', type: 'number' },
-                    { name: 'semester_id', label: 'Semester ID', type: 'number' },
-                    { name: 'lecturer_id', label: 'Lecturer ID', type: 'number' },
-                    { name: 'students_count', label: 'Students Count', type: 'number' }
+                    { name: 'code', label: 'Code' }, { name: 'title', label: 'Title' }, { name: 'credit_units', label: 'Credit Units', type: 'number' },
+                    { name: 'level', label: 'Level', type: 'number' }, { name: 'department_id', label: 'Dept ID', type: 'number' },
+                    { name: 'programme_id', label: 'Programme ID', type: 'number' }, { name: 'semester_id', label: 'Semester ID', type: 'number' },
+                    { name: 'lecturer_id', label: 'Lecturer ID', type: 'number' }, { name: 'students_count', label: 'Students', type: 'number' }
                   ]} />} />
                   <Route path="/lecturers" element={<EntityPage entityName="Lecturer" apiPath="/institution/lecturers" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Staff ID', accessor: 'staff_id' }, { header: 'User ID', accessor: 'user_id' }
                   ]} formFields={[
                     { name: 'staff_id', label: 'Staff ID' }, { name: 'user_id', label: 'User ID', type: 'number' },
-                    { name: 'department_id', label: 'Department ID', type: 'number' },
-                    { name: 'rank', label: 'Rank' }, { name: 'max_daily_hours', label: 'Max Daily Hours', type: 'number' },
+                    { name: 'department_id', label: 'Dept ID', type: 'number' }, { name: 'rank', label: 'Rank' },
+                    { name: 'max_daily_hours', label: 'Max Daily Hours', type: 'number' },
                     { name: 'max_weekly_hours', label: 'Max Weekly Hours', type: 'number' },
                     { name: 'availability', label: 'Availability (JSON)', type: 'text' }
                   ]} />} />
                   <Route path="/venues" element={<EntityPage entityName="Venue" apiPath="/institution/venues" columns={[
                     { header: 'ID', accessor: 'id' }, { header: 'Code', accessor: 'code' }, { header: 'Capacity', accessor: 'capacity' }
                   ]} formFields={[
-                    { name: 'code', label: 'Code' }, { name: 'name', label: 'Name' },
-                    { name: 'capacity', label: 'Capacity', type: 'number' },
+                    { name: 'code', label: 'Code' }, { name: 'name', label: 'Name' }, { name: 'capacity', label: 'Capacity', type: 'number' },
                     { name: 'building', label: 'Building' }, { name: 'resources', label: 'Resources' },
                     { name: 'institution_id', label: 'Institution ID', type: 'number' }
                   ]} />} />
                   <Route path="/timetable/generate" element={<TimetableGeneratorPage />} />
                   <Route path="/timetable/view" element={<TimetableViewPage />} />
-                  <Route path="/analytics" element={<AnalyticsDashboard />} />
+                  <Route path="/notifications" element={<NotificationsPage />} />
+                  <Route path="/audit-logs" element={<AuditLogsPage />} />
+                  <Route path="/reports" element={<ReportsPage />} />
                   <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 </Routes>
               </DashboardLayout>
@@ -852,11 +947,11 @@
     const root = createRoot(document.getElementById('root'));
     root.render(
       <Router>
-        <AuthProvider>
+        <QueryClientProvider client={queryClient}>
           <ToastProvider>
             <App />
           </ToastProvider>
-        </AuthProvider>
+        </QueryClientProvider>
       </Router>
     );
   </script>
