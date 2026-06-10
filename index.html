@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Timetable Generator</title>
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: {} }
+    }
+  </script>
+  <!-- Font Awesome for icons (free) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+  <style>
+    /* Custom scrollbar and misc */
+    .sidebar::-webkit-scrollbar { width: 6px; }
+    .sidebar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .dark .sidebar::-webkit-scrollbar-thumb { background: #475569; }
+  </style>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen">
+  <div id="root"></div>
+
+  <!-- ESM Imports -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "react-router-dom": "https://esm.sh/react-router-dom@6.20.0",
+        "recharts": "https://esm.sh/recharts@2.10.3",
+        "jspdf": "https://esm.sh/jspdf@2.5.1",
+        "html2canvas": "https://esm.sh/html2canvas@1.4.1"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import React, { useState, useEffect, useContext, createContext, useRef, useCallback, useMemo } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation, Navigate, useParams } from 'react-router-dom';
+    import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+    import jsPDF from 'jspdf';
+    import html2canvas from 'html2canvas';
+
+    // ---------- Constants ----------
+    const API_BASE = window.location.origin + '/api';
+    const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'];
+
+    // ---------- Auth Context ----------
+    const AuthContext = createContext();
+
+    function AuthProvider({ children }) {
+      const [user, setUser] = useState(null);
+      const [token, setToken] = useState(localStorage.getItem('token') || null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        if (token) {
+          fetchUser();
+        } else {
+          setLoading(false);
+        }
+      }, [token]);
+
+      const fetchUser = async () => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setUser(data.user);
+          } else {
+            logout();
+          }
+        } catch { logout(); }
+        setLoading(false);
+      };
+
+      const login = (newToken, userData) => {
+        localStorage.setItem('token', newToken);
+        setToken(newToken);
+        setUser(userData);
+      };
+
+      const logout = () => {
+        localStorage.removeItem('token');
+        setToken(null);
+        setUser(null);
+      };
+
+      return (
+        <AuthContext.Provider value={{ user, token, login, logout, loading }}>
+          {children}
+        </AuthContext.Provider>
+      );
+    }
+
+    function useAuth() { return useContext(AuthContext); }
+
+    // ---------- API Helper ----------
+    function useApi() {
+      const { token, logout } = useAuth();
+      const fetchWithAuth = useCallback(async (url, options = {}) => {
+        const headers = { 'Content-Type': 'application/json', ...options.headers };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
+        if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ msg: 'Request failed' }));
+          throw new Error(err.msg || 'Error');
+        }
+        return res.json();
+      }, [token, logout]);
+      return fetchWithAuth;
+    }
+
+    // ---------- Toast (simple) ----------
+    const ToastContext = createContext();
+    function ToastProvider({ children }) {
+      const [toasts, setToasts] = useState([]);
+      const addToast = (msg, type = 'info') => {
+        const id = Date.now();
+        setToasts(prev => [...prev, { id, msg, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+      };
+      return (
+        <ToastContext.Provider value={{ addToast }}>
+          {children}
+          <div className="fixed top-4 right-4 z-50 space-y-2">
+            {toasts.map(t => (
+              <div key={t.id} className={`px-4 py-2 rounded shadow-lg text-white ${t.type === 'success' ? 'bg-green-600' : t.type === 'error' ? 'bg-red-600' : 'bg-blue-600'}`}>
+                {t.msg}
+              </div>
+            ))}
+          </div>
+        </ToastContext.Provider>
+      );
+    }
+    function useToast() { return useContext(ToastContext); }
+
+    // ---------- Protected Route Component ----------
+    function ProtectedRoute({ children, roles }) {
+      const { user, loading } = useAuth();
+      const location = useLocation();
+      if (loading) return <div className="flex justify-center items-center h-screen">Loading...</div>;
+      if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
+      if (roles && !roles.includes(user.role)) return <div className="p-8 text-red-500">Access Denied</div>;
+      return children;
+    }
+
+    // ---------- Pages ----------
+    function LoginPage() {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [error, setError] = useState('');
+      const { login } = useAuth();
+      const navigate = useNavigate();
+      const { addToast } = useToast();
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        try {
+          const res = await fetch(`${API_BASE}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.msg || 'Login failed');
+          login(data.access_token, data.user);
+          addToast('Login successful', 'success');
+          navigate('/dashboard');
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+          <div className="bg-white dark:bg-gray-900 p-8 rounded-lg shadow-md w-full max-w-md">
+            <h2 className="text-2xl font-bold mb-6 text-center">Sign In</h2>
+            {error && <div className="mb-4 text-red-500 text-sm">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required className="w-full p-2 border rounded dark:bg-gray-800" />
+              <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} required className="w-full p-2 border rounded dark:bg-gray-800" />
+              <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Login</button>
+            </form>
+            <div className="mt-4 text-center">
+              <Link to="/register" className="text-blue-600 hover:underline">Create account</Link>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function RegisterPage() {
+      const [form, setForm] = useState({ email: '', password: '', first_name: '', last_name: '' });
+      const [error, setError] = useState('');
+      const navigate = useNavigate();
+      const { addToast } = useToast();
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        try {
+          const res = await fetch(`${API_BASE}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(form)
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.msg || 'Registration failed');
+          addToast('Registration successful, please verify email', 'success');
+          navigate('/login');
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+          <div className="bg-white dark:bg-gray-900 p-8 rounded-lg shadow-md w-full max-w-md">
+            <h2 className="text-2xl font-bold mb-6 text-center">Register</h2>
+            {error && <div className="mb-4 text-red-500 text-sm">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <input placeholder="First Name" value={form.first_name} onChange={e => setForm({...form, first_name: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
+              <input placeholder="Last Name" value={form.last_name} onChange={e => setForm({...form, last_name: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
+              <input type="email" placeholder="Email" required value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
+              <input type="password" placeholder="Password" required value={form.password} onChange={e => setForm({...form, password: e.target.value})} className="w-full p-2 border rounded dark:bg-gray-800" />
+              <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Register</button>
+            </form>
+            <div className="mt-4 text-center">
+              <Link to="/login" className="text-blue-600 hover:underline">Already have an account?</Link>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---------- Layout ----------
+    function DashboardLayout({ children }) {
+      const { user, logout } = useAuth();
+      const [sidebarOpen, setSidebarOpen] = useState(true);
+      const [dark, setDark] = useState(localStorage.getItem('theme') === 'dark');
+      const toggleDark = () => {
+        const newDark = !dark;
+        setDark(newDark);
+        localStorage.setItem('theme', newDark ? 'dark' : 'light');
+        document.documentElement.classList.toggle('dark', newDark);
+      };
+
+      const navItems = useMemo(() => {
+        const items = [
+          { to: '/dashboard', icon: 'fa-tachometer-alt', label: 'Dashboard', roles: ['super_admin','institution_admin','hod'] },
+          { to: '/faculties', icon: 'fa-building', label: 'Faculties', roles: ['super_admin','institution_admin'] },
+          { to: '/departments', icon: 'fa-sitemap', label: 'Departments', roles: ['super_admin','institution_admin'] },
+          { to: '/programmes', icon: 'fa-graduation-cap', label: 'Programmes', roles: ['super_admin','institution_admin'] },
+          { to: '/sessions', icon: 'fa-calendar', label: 'Sessions', roles: ['super_admin','institution_admin'] },
+          { to: '/semesters', icon: 'fa-calendar-alt', label: 'Semesters', roles: ['super_admin','institution_admin'] },
+          { to: '/courses', icon: 'fa-book', label: 'Courses', roles: ['super_admin','institution_admin','hod'] },
+          { to: '/lecturers', icon: 'fa-chalkboard-teacher', label: 'Lecturers', roles: ['super_admin','institution_admin'] },
+          { to: '/venues', icon: 'fa-door-open', label: 'Venues', roles: ['super_admin','institution_admin'] },
+          { to: '/timetable/generate', icon: 'fa-magic', label: 'Generate', roles: ['super_admin','institution_admin','hod'] },
+          { to: '/timetable/view', icon: 'fa-table', label: 'View Timetable', roles: ['super_admin','institution_admin','hod','lecturer','student'] },
+          { to: '/analytics', icon: 'fa-chart-pie', label: 'Analytics', roles: ['super_admin','institution_admin'] },
+        ];
+        if (user?.role === 'super_admin') {
+          items.unshift({ to: '/admin/users', icon: 'fa-users', label: 'Users', roles: ['super_admin'] });
+          items.unshift({ to: '/admin/institutions', icon: 'fa-university', label: 'Institutions', roles: ['super_admin'] });
+        }
+        return items.filter(i => i.roles.includes(user?.role));
+      }, [user]);
+
+      return (
+        <div className="flex h-screen">
+          {/* Sidebar */}
+          <div className={`${sidebarOpen ? 'w-64' : 'w-20'} bg-gray-800 text-white transition-all duration-300 overflow-y-auto sidebar`}>
+            <div className="p-4 flex justify-between items-center">
+              {sidebarOpen && <h2 className="text-xl font-bold">Timetable</h2>}
+              <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-white">
+                <i className={`fas ${sidebarOpen ? 'fa-times' : 'fa-bars'}`}></i>
+              </button>
+            </div>
+            <nav className="mt-4">
+              {navItems.map(item => (
+                <Link key={item.to} to={item.to} className="flex items-center px-4 py-3 hover:bg-gray-700 transition">
+                  <i className={`fas ${item.icon} w-6`}></i>
+                  {sidebarOpen && <span className="ml-3">{item.label}</span>}
+                </Link>
+              ))}
+            </nav>
+          </div>
+          {/* Main content */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <header className="bg-white dark:bg-gray-800 shadow p-4 flex justify-between items-center">
+              <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-xl lg:hidden">
+                <i className="fas fa-bars"></i>
+              </button>
+              <div className="flex items-center space-x-4">
+                <button onClick={toggleDark} className="p-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700">
+                  <i className={`fas ${dark ? 'fa-sun' : 'fa-moon'}`}></i>
+                </button>
+                <span>{user?.first_name} {user?.last_name} ({user?.role})</span>
+                <button onClick={logout} className="text-red-500 hover:text-red-700">Logout</button>
+              </div>
+            </header>
+            <main className="flex-1 overflow-y-auto p-6 bg-gray-50 dark:bg-gray-900">
+              {children}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    // ---------- Generic DataTable Component ----------
+    function DataTable({ columns, data, onEdit, onDelete, loading }) {
+      const [search, setSearch] = useState('');
+      const [currentPage, setCurrentPage] = useState(1);
+      const perPage = 10;
+
+      const filtered = data.filter(row =>
+        columns.some(col => String(row[col.accessor] || '').toLowerCase().includes(search.toLowerCase()))
+      );
+      const totalPages = Math.ceil(filtered.length / perPage);
+      const paginated = filtered.slice((currentPage-1)*perPage, currentPage*perPage);
+
+      return (
+        <div>
+          <input
+            type="text"
+            placeholder="Search..."
+            value={search}
+            onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}
+            className="mb-4 p-2 border rounded w-full max-w-sm dark:bg-gray-800"
+          />
+          {loading ? (
+            <p>Loading...</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white dark:bg-gray-800 border">
+                  <thead>
+                    <tr className="bg-gray-200 dark:bg-gray-700">
+                      {columns.map(col => (
+                        <th key={col.accessor} className="px-4 py-2 text-left">{col.header}</th>
+                      ))}
+                      {(onEdit || onDelete) && <th className="px-4 py-2">Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paginated.map((row, idx) => (
+                      <tr key={row.id || idx} className="border-t hover:bg-gray-50 dark:hover:bg-gray-700">
+                        {columns.map(col => (
+                          <td key={col.accessor} className="px-4 py-2">{row[col.accessor] ?? ''}</td>
+                        ))}
+                        {(onEdit || onDelete) && (
+                          <td className="px-4 py-2 space-x-2">
+                            {onEdit && <button onClick={() => onEdit(row)} className="text-blue-600 hover:underline"><i className="fas fa-edit"></i></button>}
+                            {onDelete && <button onClick={() => onDelete(row.id)} className="text-red-600 hover:underline"><i className="fas fa-trash"></i></button>}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                    {paginated.length === 0 && (
+                      <tr><td colSpan={columns.length + (onEdit||onDelete?1:0)} className="text-center py-4">No data</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {totalPages > 1 && (
+                <div className="flex justify-center mt-4 space-x-2">
+                  <button onClick={() => setCurrentPage(p => Math.max(1, p-1))} disabled={currentPage===1} className="px-3 py-1 border rounded disabled:opacity-50">Prev</button>
+                  <span className="px-3 py-1">{currentPage} / {totalPages}</span>
+                  <button onClick={() => setCurrentPage(p => Math.min(totalPages, p+1))} disabled={currentPage===totalPages} className="px-3 py-1 border rounded disabled:opacity-50">Next</button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ---------- Generic CRUD Page ----------
+    function EntityPage({ entityName, apiPath, columns, formFields, onFormData }) {
+      const fetchWithAuth = useApi();
+      const [data, setData] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [showForm, setShowForm] = useState(false);
+      const [editItem, setEditItem] = useState(null);
+      const { addToast } = useToast();
+
+      const loadData = useCallback(async () => {
+        setLoading(true);
+        try {
+          const res = await fetchWithAuth(apiPath);
+          setData(res);
+        } catch (err) { addToast(err.message, 'error'); }
+        setLoading(false);
+      }, [apiPath]);
+
+      useEffect(() => { loadData(); }, [loadData]);
+
+      const handleDelete = async (id) => {
+        if (!confirm('Delete?')) return;
+        try {
+          await fetchWithAuth(`${apiPath}/${id}`, { method: 'DELETE' });
+          addToast('Deleted', 'success');
+          loadData();
+        } catch (err) { addToast(err.message, 'error'); }
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        const form = new FormData(e.target);
+        const payload = Object.fromEntries(form.entries());
+        // Convert numeric fields if needed
+        for (const field of formFields) {
+          if (field.type === 'number' && payload[field.name]) payload[field.name] = Number(payload[field.name]);
+        }
+        try {
+          if (editItem) {
+            await fetchWithAuth(`${apiPath}/${editItem.id}`, {
+              method: 'PUT',
+              body: JSON.stringify(payload)
+            });
+            addToast('Updated', 'success');
+          } else {
+            await fetchWithAuth(apiPath, {
+              method: 'POST',
+              body: JSON.stringify(payload)
+            });
+            addToast('Created', 'success');
+          }
+          setShowForm(false);
+          setEditItem(null);
+          loadData();
+        } catch (err) { addToast(err.message, 'error'); }
+      };
+
+      const openEdit = (item) => {
+        setEditItem(item);
+        setShowForm(true);
+      };
+
+      return (
+        <div>
+          <div className="flex justify-between items-center mb-4">
+            <h1 className="text-2xl font-bold">{entityName}</h1>
+            <button onClick={() => { setShowForm(true); setEditItem(null); }} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+              Add {entityName}
+            </button>
+          </div>
+
+          {showForm && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-white dark:bg-gray-800 p-6 rounded-lg w-full max-w-lg max-h-screen overflow-y-auto">
+                <h2 className="text-xl mb-4">{editItem ? 'Edit' : 'Create'} {entityName}</h2>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                  {formFields.map(field => (
+                    <div key={field.name}>
+                      <label className="block text-sm mb-1">{field.label}</label>
+                      {field.type === 'select' ? (
+                        <select name={field.name} defaultValue={editItem?.[field.name] || ''} required className="w-full p-2 border rounded dark:bg-gray-700">
+                          <option value="">Select...</option>
+                          {field.options?.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          type={field.type || 'text'}
+                          name={field.name}
+                          defaultValue={editItem?.[field.name] || ''}
+                          required={field.required !== false}
+                          className="w-full p-2 border rounded dark:bg-gray-700"
+                          step={field.type === 'number' ? 'any' : undefined}
+                        />
+                      )}
+                    </div>
+                  ))}
+                  <div className="flex justify-end space-x-2">
+                    <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 border rounded">Cancel</button>
+                    <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">Save</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          <DataTable columns={columns} data={data} onEdit={openEdit} onDelete={handleDelete} loading={loading} />
+        </div>
+      );
+    }
+
+    // ---------- Timetable Generator Page ----------
+    function TimetableGeneratorPage() {
+      const fetchWithAuth = useApi();
+      const [sessions, setSessions] = useState([]);
+      const [semesters, setSemesters] = useState([]);
+      const [selectedSession, setSelectedSession] = useState('');
+      const [selectedSemester, setSelectedSemester] = useState('');
+      const [generating, setGenerating] = useState(false);
+      const [result, setResult] = useState(null);
+      const { addToast } = useToast();
+
+      useEffect(() => {
+        fetchWithAuth('/institution/sessions').then(setSessions).catch(()=>{});
+        fetchWithAuth('/institution/semesters').then(setSemesters).catch(()=>{});
+      }, []);
+
+      const handleGenerate = async () => {
+        if (!selectedSession || !selectedSemester) {
+          addToast('Select session and semester', 'error');
+          return;
+        }
+        setGenerating(true);
+        try {
+          const res = await fetchWithAuth('/timetable/generate', {
+            method: 'POST',
+            body: JSON.stringify({ session_id: Number(selectedSession), semester_id: Number(selectedSemester) })
+          });
+          setResult(res);
+          addToast(`Timetable generated with quality score ${res.quality_score}`, 'success');
+        } catch (err) { addToast(err.message, 'error'); }
+        setGenerating(false);
+      };
+
+      return (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">Generate Timetable</h1>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <select value={selectedSession} onChange={e => setSelectedSession(e.target.value)} className="p-2 border rounded dark:bg-gray-800">
+              <option value="">Select Session</option>
+              {sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <select value={selectedSemester} onChange={e => setSelectedSemester(e.target.value)} className="p-2 border rounded dark:bg-gray-800">
+              <option value="">Select Semester</option>
+              {semesters.filter(s => s.session_id == selectedSession).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <button onClick={handleGenerate} disabled={generating} className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50">
+            {generating ? 'Generating...' : 'Generate Timetable'}
+          </button>
+          {result && (
+            <div className="mt-4 p-4 bg-white dark:bg-gray-800 rounded shadow">
+              <p>Generation ID: {result.generation_id}</p>
+              <p>Quality Score: {result.quality_score}</p>
+              <p>Status: {result.status}</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ---------- Timetable View Page ----------
+    function TimetableViewPage() {
+      const fetchWithAuth = useApi();
+      const [generations, setGenerations] = useState([]);
+      const [selectedGen, setSelectedGen] = useState('');
+      const [slots, setSlots] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const { addToast } = useToast();
+
+      useEffect(() => {
+        fetchWithAuth('/timetable/generations').then(setGenerations).catch(()=>{});
+      }, []);
+
+      const loadSlots = async (genId) => {
+        setLoading(true);
+        try {
+          const data = await fetchWithAuth(`/timetable/slots?generation_id=${genId}`);
+          setSlots(data);
+        } catch (err) { addToast(err.message, 'error'); }
+        setLoading(false);
+      };
+
+      const handleGenChange = (e) => {
+        setSelectedGen(e.target.value);
+        if (e.target.value) loadSlots(e.target.value);
+        else setSlots([]);
+      };
+
+      const handleDragStart = (e, slotId) => {
+        e.dataTransfer.setData('text/plain', slotId);
+      };
+
+      const handleDrop = async (e, targetDay, targetPeriod) => {
+        e.preventDefault();
+        const slotId = e.dataTransfer.getData('text/plain');
+        if (!slotId) return;
+        try {
+          await fetchWithAuth(`/timetable/slots/${slotId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ day: targetDay, period: targetPeriod })
+          });
+          addToast('Slot updated', 'success');
+          loadSlots(selectedGen);
+        } catch (err) { addToast(err.message, 'error'); }
+      };
+
+      const exportPDF = () => window.open(`${API_BASE}/timetable/export/pdf/${selectedGen}`, '_blank');
+      const exportExcel = () => window.open(`${API_BASE}/timetable/export/excel/${selectedGen}`, '_blank');
+      const exportCSV = () => window.open(`${API_BASE}/timetable/export/csv/${selectedGen}`, '_blank');
+      const exportImage = () => window.open(`${API_BASE}/timetable/export/image/${selectedGen}`, '_blank');
+
+      // Build timetable grid from slots
+      const days = DAYS;
+      const periods = [...new Set(slots.map(s => s.period))].sort((a,b)=>a-b);
+
+      return (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">View Timetable</h1>
+          <select value={selectedGen} onChange={handleGenChange} className="p-2 border rounded dark:bg-gray-800 mb-4">
+            <option value="">Select Generation</option>
+            {generations.map(g => <option key={g.id} value={g.id}>Gen {g.id} - {g.status} ({g.quality_score})</option>)}
+          </select>
+          {selectedGen && (
+            <div className="flex space-x-2 mb-4">
+              <button onClick={exportPDF} className="bg-red-600 text-white px-3 py-1 rounded"><i className="fas fa-file-pdf"></i> PDF</button>
+              <button onClick={exportExcel} className="bg-green-600 text-white px-3 py-1 rounded"><i className="fas fa-file-excel"></i> Excel</button>
+              <button onClick={exportCSV} className="bg-blue-600 text-white px-3 py-1 rounded"><i className="fas fa-file-csv"></i> CSV</button>
+              <button onClick={exportImage} className="bg-purple-600 text-white px-3 py-1 rounded"><i className="fas fa-image"></i> Image</button>
+            </div>
+          )}
+          {loading ? <p>Loading slots...</p> : (
+            slots.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border bg-white dark:bg-gray-800">
+                  <thead>
+                    <tr className="bg-gray-200 dark:bg-gray-700">
+                      <th className="p-2">Period</th>
+                      {days.map(day => <th key={day} className="p-2">{day}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {periods.map(period => (
+                      <tr key={period}>
+                        <td className="p-2 border font-medium">{period}</td>
+                        {days.map(day => {
+                          const slot = slots.find(s => s.day === day && s.period === period);
+                          return (
+                            <td
+                              key={day}
+                              className="p-2 border min-w-[120px] h-16 relative"
+                              onDragOver={e => e.preventDefault()}
+                              onDrop={e => handleDrop(e, day, period)}
+                            >
+                              {slot && (
+                                <div
+                                  draggable
+                                  onDragStart={e => handleDragStart(e, slot.id)}
+                                  className="bg-blue-100 dark:bg-blue-900 p-1 rounded cursor-move text-sm"
+                                  style={{ backgroundColor: `hsl(${slot.course?.code?.charCodeAt(0)*30 || 0}, 70%, 80%)` }}
+                                >
+                                  <div className="font-bold">{slot.course?.code}</div>
+                                  <div className="text-xs">{slot.venue?.code}</div>
+                                  <div className="text-xs">{slot.lecturer?.name}</div>
+                                </div>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          )}
+        </div>
+      );
+    }
+
+    // ---------- Analytics Dashboard ----------
+    function AnalyticsDashboard() {
+      const fetchWithAuth = useApi();
+      const [stats, setStats] = useState(null);
+
+      useEffect(() => {
+        // Fetch analytics data (dummy endpoint)
+        fetchWithAuth('/analytics/summary').then(setStats).catch(()=>{});
+      }, []);
+
+      const venueData = stats?.venueUtilization || [];
+      const lecturerData = stats?.lecturerWorkload || [];
+      const qualityTrend = stats?.qualityTrend || [];
+
+      return (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">Analytics Dashboard</h1>
+          {stats ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
+                <h3 className="font-bold mb-2">Venue Utilization</h3>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={venueData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" />
+                    <YAxis />
+                    <Tooltip />
+                    <Bar dataKey="utilization" fill="#8884d8" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
+                <h3 className="font-bold mb-2">Lecturer Workload</h3>
+                <ResponsiveContainer width="100%" height={200}>
+                  <PieChart>
+                    <Pie data={lecturerData} dataKey="hours" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
+                      {lecturerData.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded shadow">
+                <h3 className="font-bold mb-2">Quality Trend</h3>
+                <ResponsiveContainer width="100%" height={200}>
+                  <LineChart data={qualityTrend}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="date" />
+                    <YAxis domain={[0,100]} />
+                    <Tooltip />
+                    <Line type="monotone" dataKey="score" stroke="#82ca9d" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          ) : <p>Loading analytics...</p>}
+        </div>
+      );
+    }
+
+    // ---------- Simple Analytics API (dummy data for now) ----------
+    // This will be added in backend later; for now we use a fake endpoint that returns empty data.
+
+    // ---------- App Component ----------
+    function App() {
+      const { loading } = useAuth();
+      if (loading) return <div className="flex justify-center items-center h-screen">Loading...</div>;
+
+      return (
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/*" element={
+            <ProtectedRoute>
+              <DashboardLayout>
+                <Routes>
+                  <Route path="/dashboard" element={<AnalyticsDashboard />} />
+                  <Route path="/admin/users" element={<EntityPage entityName="User" apiPath="/admin/users" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Email', accessor: 'email' },
+                    { header: 'Name', accessor: 'first_name' }, { header: 'Role', accessor: 'role' }
+                  ]} formFields={[
+                    { name: 'email', label: 'Email', type: 'email' },
+                    { name: 'password', label: 'Password (only for new)', type: 'password', required: false },
+                    { name: 'first_name', label: 'First Name' },
+                    { name: 'last_name', label: 'Last Name' },
+                    { name: 'role', label: 'Role', type: 'select', options: [
+                      { value: 'super_admin', label: 'Super Admin' }, { value: 'institution_admin', label: 'Institution Admin' },
+                      { value: 'hod', label: 'HOD' }, { value: 'lecturer', label: 'Lecturer' }, { value: 'student', label: 'Student' }
+                    ]}
+                  ]} />} />
+                  <Route path="/admin/institutions" element={<EntityPage entityName="Institution" apiPath="/admin/institutions" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
+                  ]} formFields={[
+                    { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' }, { name: 'type', label: 'Type' },
+                    { name: 'address', label: 'Address' }, { name: 'logo_url', label: 'Logo URL' }
+                  ]} />} />
+                  {/* Other entity routes follow same pattern */}
+                  <Route path="/faculties" element={<EntityPage entityName="Faculty" apiPath="/institution/faculties" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
+                  ]} formFields={[
+                    { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' },
+                    { name: 'institution_id', label: 'Institution ID', type: 'number' }
+                  ]} />} />
+                  <Route path="/departments" element={<EntityPage entityName="Department" apiPath="/institution/departments" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
+                  ]} formFields={[
+                    { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' },
+                    { name: 'faculty_id', label: 'Faculty ID', type: 'number' },
+                    { name: 'institution_id', label: 'Institution ID', type: 'number' }
+                  ]} />} />
+                  <Route path="/programmes" element={<EntityPage entityName="Programme" apiPath="/institution/programmes" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Code', accessor: 'code' }
+                  ]} formFields={[
+                    { name: 'name', label: 'Name' }, { name: 'code', label: 'Code' },
+                    { name: 'department_id', label: 'Department ID', type: 'number' },
+                    { name: 'duration_years', label: 'Duration (years)', type: 'number' }
+                  ]} />} />
+                  <Route path="/sessions" element={<EntityPage entityName="Academic Session" apiPath="/institution/sessions" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Current', accessor: 'is_current' }
+                  ]} formFields={[
+                    { name: 'name', label: 'Name' }, { name: 'start_date', label: 'Start Date', type: 'date' },
+                    { name: 'end_date', label: 'End Date', type: 'date' },
+                    { name: 'institution_id', label: 'Institution ID', type: 'number' },
+                    { name: 'is_current', label: 'Is Current?', type: 'checkbox' }
+                  ]} />} />
+                  <Route path="/semesters" element={<EntityPage entityName="Semester" apiPath="/institution/semesters" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Session ID', accessor: 'session_id' }
+                  ]} formFields={[
+                    { name: 'name', label: 'Name' }, { name: 'session_id', label: 'Session ID', type: 'number' },
+                    { name: 'start_date', label: 'Start Date', type: 'date' }, { name: 'end_date', label: 'End Date', type: 'date' }
+                  ]} />} />
+                  <Route path="/courses" element={<EntityPage entityName="Course" apiPath="/institution/courses" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Code', accessor: 'code' }, { header: 'Title', accessor: 'title' }
+                  ]} formFields={[
+                    { name: 'code', label: 'Code' }, { name: 'title', label: 'Title' },
+                    { name: 'credit_units', label: 'Credit Units', type: 'number' },
+                    { name: 'level', label: 'Level', type: 'number' },
+                    { name: 'department_id', label: 'Department ID', type: 'number' },
+                    { name: 'programme_id', label: 'Programme ID', type: 'number' },
+                    { name: 'semester_id', label: 'Semester ID', type: 'number' },
+                    { name: 'lecturer_id', label: 'Lecturer ID', type: 'number' },
+                    { name: 'students_count', label: 'Students Count', type: 'number' }
+                  ]} />} />
+                  <Route path="/lecturers" element={<EntityPage entityName="Lecturer" apiPath="/institution/lecturers" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Staff ID', accessor: 'staff_id' }, { header: 'User ID', accessor: 'user_id' }
+                  ]} formFields={[
+                    { name: 'staff_id', label: 'Staff ID' }, { name: 'user_id', label: 'User ID', type: 'number' },
+                    { name: 'department_id', label: 'Department ID', type: 'number' },
+                    { name: 'rank', label: 'Rank' }, { name: 'max_daily_hours', label: 'Max Daily Hours', type: 'number' },
+                    { name: 'max_weekly_hours', label: 'Max Weekly Hours', type: 'number' },
+                    { name: 'availability', label: 'Availability (JSON)', type: 'text' }
+                  ]} />} />
+                  <Route path="/venues" element={<EntityPage entityName="Venue" apiPath="/institution/venues" columns={[
+                    { header: 'ID', accessor: 'id' }, { header: 'Code', accessor: 'code' }, { header: 'Capacity', accessor: 'capacity' }
+                  ]} formFields={[
+                    { name: 'code', label: 'Code' }, { name: 'name', label: 'Name' },
+                    { name: 'capacity', label: 'Capacity', type: 'number' },
+                    { name: 'building', label: 'Building' }, { name: 'resources', label: 'Resources' },
+                    { name: 'institution_id', label: 'Institution ID', type: 'number' }
+                  ]} />} />
+                  <Route path="/timetable/generate" element={<TimetableGeneratorPage />} />
+                  <Route path="/timetable/view" element={<TimetableViewPage />} />
+                  <Route path="/analytics" element={<AnalyticsDashboard />} />
+                  <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                </Routes>
+              </DashboardLayout>
+            </ProtectedRoute>
+          } />
+        </Routes>
+      );
+    }
+
+    // ---------- Render ----------
+    const root = createRoot(document.getElementById('root'));
+    root.render(
+      <Router>
+        <AuthProvider>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </AuthProvider>
+      </Router>
+    );
+  </script>
+</body>
+</html>
