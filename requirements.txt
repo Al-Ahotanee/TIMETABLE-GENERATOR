@@ -1,0 +1,13 @@
+flask>=2.3.0
+flask-sqlalchemy>=3.0
+psycopg2-binary>=2.9
+flask-jwt-extended>=4.5
+flask-cors>=4.0
+flask-mail>=0.9
+ortools>=9.7
+reportlab>=4.0
+openpyxl>=3.1
+pillow>=10.0
+gunicorn>=21.2
+flask-limiter>=3.3
+itsdangerous>=2.1
